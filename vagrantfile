@@ -1,0 +1,223 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+# All Vagrant configuration is done below. The "2" in Vagrant.configure
+# configures the configuration version (we support older styles for
+# backwards compatibility). Please don't change it unless you know what
+# you're doing.
+Vagrant.configure("2") do |config|
+  #config
+  #config.vm.network :public_network,
+  #:dev => "virbr0",
+  #:mode => "bridge",
+  #:type => "bridge"
+  # The most common configuration options are documented and commented below.
+  # For a complete reference, please see the online documentation at
+  # https://docs.vagrantup.com.
+ 
+  # Every Vagrant development environment requires a box. You can search for
+  # boxes at https://vagrantcloud.com/search.
+ 
+  config.vm.define :odoo do |odoo|
+    odoo.vm.box = "generic/fedora38"
+    odoo.vm.network "forwarded_port", guest: 80, host: 8080, protocol: "tcp"
+    odoo.vm.network "forwarded_port", guest: 443, host: 8443, protocol: "tcp"
+    odoo.vm.network "forwarded_port", guest:8069, host: 8069, protocol: "tcp"
+    #odoo.vm.network :public_network, :dev => "eno1", :mode => "bridge", :type => "bridge"
+    odoo.vm.provider :libvirt do |libvirt|
+      libvirt.id_ssh_key_file = "/home/jason/projects/kali_remote/id_ssh.key"
+      #libvirt.uri = "qemu+ssh://10.130.10.50/system"
+      libvirt.host = '10.130.10.50'
+      libvirt.connect_via_ssh = true
+      libvirt.username = "jason"
+      libvirt.password = ''
+      libvirt.memory = 2048
+      libvirt.cpus = 2
+      #libvirt.nested = true
+      #libvirt.graphics_port = 5901
+      #libvirt.graphics_ip = '0.0.0.0'
+      #libvirt.video_type = 'qxl'
+      # Required for virtiofs
+      # libvirt.memorybacking :access, :mode => "shared"
+    end
+  end
+ 
+  # Default false
+  config.ssh.forward_agent = true
+  config.ssh.forward_x11 = true
+ 
+  # Default true
+  config.ssh.keep_alive = false
+ 
+  # Default 300s
+  config.vm.boot_timeout = 900
+
+  config.vm.provision "file", source: "~/projects/gm-com-chain.pem", destination: "~/"
+
+  
+  config.vm.provision "shell", inline: <<-SHELL
+    echo foo
+    sudo cp /home/vagrant/gm-com-chain.pem /etc/pki/ca-trust/source/anchors/
+    #sudo mv ~/gdroot-g2.pem /etc/pki/fwupd/
+    #sudo update-ca-trust
+    # Base requirements for installing X11
+    #sudo dnf update -y
+    #sudo dnf install -y git
+    # Add desktop environment
+    #sudo dnf install -y xorg-x11-xauth
+    #sudo dnf install -y xclock
+    #sudo dnf install -y gnome-shell
+    #sudo dnf install xorg-x11-apps
+    #sudo dnf install -y xorg*
+    #sudo dnf install -y @xfce-desktop-environment
+    #sudo dnf install -y vscode
+    sudo sed -i '/#X11Forwarding no/s//X11Forwarding yes/' /etc/ssh/sshd_config
+    sudo rm -rf /root/.Xauthority
+    sudo rm -rf /root/.serverauth.*  
+  SHELL
+  
+  config.vm.provision "shell", privileged: false, inline: <<-SHELL
+    echo bar
+    sudo dnf install -y postgresql-server
+    sudo postgresql-setup --initdb --unit postgresql
+    sudo systemctl enable postgresql
+    sudo systemctl start postgresql
+    sudo dnf install -y wkhtmltopdf
+    sudo echo '
+    [options]
+    admin_passwd = mysupersecretpassword
+    db_host = 127.0.0.1
+    db_port = 5432
+    db_user = odoo
+    db_password = pwd
+    limit_memory_hard = 1677721600
+    limit_memory_soft = 629145600
+    limit_request = 8192
+    limit_time_cpu = 600
+    limit_time_real = 1200
+    max_cron_threads = 1
+    workers = 8' > ~/.odoorc
+  SHELL
+  
+  config.vm.provision "shell", privileged: false, inline: <<-SHELL
+    echo bas
+    #echo export PATH="$HOME/.cargo/bin:$PATH" >> ~/.bashrc
+    #echo export PATH="$HOME/veilid/target/release:$PATH" >> ~/.bashrc
+    sudo dnf config-manager --add-repo=https://nightly.odoo.com/17.0/nightly/rpm/odoo.repo
+
+    sudo dnf install -y odoo
+   
+    sudo systemctl enable odoo
+   
+    sudo systemctl start odoo
+  SHELL
+
+  config.vm.provision "shell", privileged: false, inline: <<-SHELL
+    sudo dnf install -y yum-utils
+    sudo echo '[nginx-stable]
+name=nginx stable repo
+baseurl=http://nginx.org/packages/centos/9/x86_64/
+gpgcheck=1
+enabled=1
+gpgkey=https://nginx.org/keys/nginx_signing.key
+module_hotfixes=true
+
+[nginx-mainline]
+name=nginx mainline repo
+baseurl=http://nginx.org/packages/mainline/centos/9/x86_64/
+gpgcheck=1
+enabled=0
+gpgkey=https://nginx.org/keys/nginx_signing.key
+module_hotfixes=true' > /tmp/nginx.repo
+    sudo mv /tmp/nginx.repo /etc/yum.repos.d/nginx.repo
+    sudo dnf config-manager --enable -y nginx-mainline
+    sudo dnf update -y
+    sudo dnf install -y nginx
+    sudo echo -e '
+    #odoo server
+    upstream odoo {
+      server 127.0.0.1:8069;
+    }
+    upstream odoochat {
+      server 127.0.0.1:8072;
+    }
+    map $http_upgrade $connection_upgrade {
+      default upgrade;
+      \x27\x27      close;
+    }
+
+    # http -> https
+    server {
+      listen 80;
+      server_name odoo.mycompany.com;
+      rewrite ^(.*) https://$host$1 permanent;
+    }
+
+    server {
+      listen 443 ssl;
+      server_name odoo.mycompany.com;
+      proxy_read_timeout 720s;
+      proxy_connect_timeout 720s;
+      proxy_send_timeout 720s;
+
+      # SSL parameters
+      ssl_certificate /etc/ssl/nginx/server.crt;
+      ssl_certificate_key /etc/ssl/nginx/server.key;
+      ssl_session_timeout 30m;
+      ssl_protocols TLSv1.2;
+      ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+      ssl_prefer_server_ciphers off;
+
+      # log
+      access_log /var/log/nginx/odoo.access.log;
+      error_log /var/log/nginx/odoo.error.log;
+
+      # Redirect websocket requests to odoo gevent port
+      location /websocket {
+        proxy_pass http://odoochat;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
+      }
+      # Redirect requests to odoo backend server
+      location @odoo {
+        # copy-paste the content of the / location block
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_redirect off;
+        proxy_pass http://odoo;
+
+        # Enable HSTS
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains";
+        # requires nginx 1.19.8
+        proxy_cookie_flags session_id samesite=lax secure;
+      }
+
+      # Serve static files right away
+      location ~ ^/[^/]+/static/.+$ {
+          root /usr/lib/python3.11/site-packages/odoo/addons/;
+          try_files $uri @odoo;
+          expires 24h;
+      }
+      
+      # common gzip
+      gzip_types text/css text/scss text/plain text/xml application/xml application/json application/javascript;
+      gzip on;
+    }'>/tmp/odoo.conf
+    sudo mv /tmp/odoo.conf /etc/nginx/odoo.conf
+    sudo systemctl enable nginx
+    sudo systemctl start nginx
+    sudo firewall-cmd --add-port=443/tcp --permanent
+    sudo firewall-cmd --add-port=80/tcp --permanent
+    sudo firewall-cmd --add-port=8069/tcp --permanent
+    sudo firewall-cmd -reload
+  SHELL
+
+  config.vm.synced_folder ".", "/vagrant", type: "rsync",
+    rsync__exclude: ".git/, ./vagrant"
+  end
